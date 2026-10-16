@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="robots" content="noindex,nofollow"><title>Вход</title>
+<style>
+:root{color-scheme:light dark;--bg:#f1f4f7;--paper:#fff;--ink:#172434;--muted:#657589;--line:#d5dde6;--blue:#4375db;--red:#cb5957}
+@media(prefers-color-scheme:dark){:root{--bg:#10161e;--paper:#18212c;--ink:#e6edf5;--muted:#93a1b2;--line:#2c3a4a}}
+*{box-sizing:border-box}body{margin:0;min-height:100vh;display:grid;place-items:center;background:var(--bg);color:var(--ink);font:15px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;padding:16px}
+form{width:min(360px,100%);background:var(--paper);border:1px solid var(--line);border-radius:16px;padding:24px;display:grid;gap:12px}
+h1{font-size:20px;margin:0 0 4px}label{display:grid;gap:4px;font-size:12px;color:var(--muted)}
+input{font:inherit;padding:10px 12px;border:1px solid var(--line);border-radius:9px;background:transparent;color:var(--ink)}
+button{font:inherit;border:0;border-radius:9px;padding:11px;background:var(--blue);color:#fff;cursor:pointer}button:disabled{opacity:.6}
+#err{color:var(--red);font-size:13px;min-height:1em;margin:0}
+</style></head><body>
+<form id="f"><h1>Разработка игры</h1>
+<label>Логин<input id="login" autocomplete="username" required></label>
+<label>Пароль<input id="password" type="password" autocomplete="current-password" required></label>
+<button id="go">Войти</button><p id="err"></p></form>
+<script>
+// Everything except this page is encrypted (AES-256-GCM, key = PBKDF2-SHA256 of login and password).
+// A wrong login or password fails authentication of the ciphertext; nothing is readable without them.
+const b64 = u => btoa(String.fromCharCode(...new Uint8Array(u)));
+const unb64 = s => Uint8Array.from(atob(s), c => c.charCodeAt(0));
+async function derive(login, password) {
+  const meta = await (await fetch('meta.json?t=' + Date.now(), {cache: 'no-store'})).json();
+  const base = await crypto.subtle.importKey('raw', new TextEncoder().encode(login + '\n' + password), 'PBKDF2', false, ['deriveKey']);
+  return crypto.subtle.deriveKey({name: 'PBKDF2', salt: unb64(meta.salt), iterations: meta.iter, hash: 'SHA-256'},
+    base, {name: 'AES-GCM', length: 256}, true, ['decrypt']);
+}
+async function open(key, name) {
+  const buf = new Uint8Array(await (await fetch(name + '?t=' + Date.now(), {cache: 'no-store'})).arrayBuffer());
+  const plain = await crypto.subtle.decrypt({name: 'AES-GCM', iv: buf.slice(0, 12)}, key, buf.slice(12));
+  return new Response(new Blob([plain]).stream().pipeThrough(new DecompressionStream('gzip'))).text();
+}
+async function start(key) {
+  const html = await open(key, 'app.enc');
+  const raw = b64(await crypto.subtle.exportKey('raw', key));
+  try { sessionStorage.setItem('k', raw); } catch (e) {}
+  // The dashboard asks the server for /control-data every 10 s; here that request reads data.enc instead.
+  const shim = `<script>(()=>{const unb64=${unb64.toString()};const open=${open.toString()};
+    const kp=crypto.subtle.importKey('raw',unb64('${raw}'),'AES-GCM',false,['decrypt']);const real=window.fetch.bind(window);
+    window.fetch=async(u,o)=>String(u).startsWith('/control-data')?new Response(await open(await kp,'data.enc'),{headers:{'Content-Type':'application/json'}}):real(u,o);})()<\/script>`;
+  document.open(); document.write(html.replace(/<head>/i, '<head>' + shim)); document.close();
+}
+(async () => {
+  let saved = null; try { saved = sessionStorage.getItem('k'); } catch (e) {}
+  if (saved) {
+    try { return await start(await crypto.subtle.importKey('raw', unb64(saved), 'AES-GCM', true, ['decrypt'])); }
+    catch (e) { try { sessionStorage.removeItem('k'); } catch (e2) {} }
+  }
+})();
+document.getElementById('f').addEventListener('submit', async ev => {
+  ev.preventDefault();
+  const go = document.getElementById('go'), err = document.getElementById('err');
+  go.disabled = true; err.textContent = '';
+  try { await start(await derive(document.getElementById('login').value.trim(), document.getElementById('password').value)); }
+  catch (e) { err.textContent = 'Неверный логин или пароль'; go.disabled = false; }
+});
+</script></body></html>
